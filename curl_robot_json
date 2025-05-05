@@ -1,0 +1,5 @@
+curl -X POST http://localhost:8000/tts/stream \
+     -H "Content-Type: application/json" \
+     -d @/home/humair/kokoro/my_doc/robot.json \
+     -o /home/humair/kokoro/my_doc/robotlong.wav
+

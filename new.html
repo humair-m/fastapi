@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>TTS Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    .fade-in {
+      animation: fadeIn 1s ease-in-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .spinner {
+      border: 4px solid rgba(0,0,0,0.1);
+      border-left-color: #4F46E5;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+  <header class="bg-gradient-to-r from-indigo-600 to-blue-500 text-white p-6 text-center shadow-lg">
+    <h1 class="text-4xl font-bold fade-in">🗣️ Text-to-Speech Dashboard</h1>
+    <div id="health" class="mt-2 text-sm">Checking server status...</div>
+  </header>
+
+  <main class="p-6 space-y-10 max-w-6xl mx-auto fade-in">
+    <!-- Loading Spinner -->
+    <div id="loader" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50 hidden">
+      <div class="spinner"></div>
+    </div>
+
+    <!-- TTS Section -->
+    <section class="bg-white rounded-2xl shadow-xl p-6 fade-in">
+      <h2 class="text-2xl font-semibold mb-4">🎤 Text to Speech</h2>
+      <textarea id="ttsText" rows="4" placeholder="Enter your text here..." class="w-full p-3 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"></textarea>
+      <div class="flex flex-col sm:flex-row gap-4 mt-4">
+        <select id="ttsVoice" class="p-3 border rounded-md flex-1 shadow-sm"></select>
+        <input type="number" id="ttsSpeed" value="1.0" min="0.5" max="2.0" step="0.1" class="p-3 border rounded-md w-full sm:w-28 shadow-sm">
+        <select id="ttsFormat" class="p-3 border rounded-md w-full sm:w-28 shadow-sm">
+          <option value="wav">WAV</option>
+          <option value="mp3">MP3</option>
+        </select>
+      </div>
+      <button onclick="submitTTS()" class="mt-5 bg-indigo-600 text-white px-6 py-3 rounded-md shadow hover:bg-indigo-700 transition duration-300">🔊 Convert to Speech</button>
+      <audio id="ttsAudio" class="mt-6 w-full rounded-lg" controls></audio>
+    </section>
+
+    <!-- Metrics Section -->
+    <section class="bg-white rounded-2xl shadow-xl p-6 fade-in">
+      <h2 class="text-2xl font-semibold mb-4">📊 Service Metrics</h2>
+      <pre id="metricsBox" class="bg-gray-100 p-4 rounded-md text-sm overflow-auto h-60">Loading...</pre>
+    </section>
+  </main>
+
+  <footer class="text-center py-4 text-gray-500">
+    &copy; 2025 TTS Dashboard. Built with ❤️ using TailwindCSS.
+  </footer>
+
+  <script>
+    const API = "http://localhost:8000";
+    const loader = document.getElementById('loader');
+
+    function showLoader() { loader.classList.remove('hidden'); }
+    function hideLoader() { loader.classList.add('hidden'); }
+
+    async function checkHealth() {
+      try {
+        const res = await fetch(`${API}/health`);
+        const data = await res.json();
+        document.getElementById('health').textContent = `✅ Server status: ${data.status}`;
+        loadVoices();
+        loadMetrics();
+      } catch (e) {
+        document.getElementById('health').textContent = `❌ Server offline`;
+      }
+    }
+
+    async function loadVoices() {
+      const res = await fetch(`${API}/voices`);
+      const data = await res.json();
+      const select = document.getElementById('ttsVoice');
+      for (const category in data) {
+        data[category].forEach(voice => {
+          const opt = document.createElement('option');
+          opt.value = voice.id;
+          opt.text = `${voice.name} (${category})`;
+          select.appendChild(opt);
+        });
+      }
+    }
+
+    async function loadMetrics() {
+      const res = await fetch(`${API}/metrics`);
+      const data = await res.json();
+      document.getElementById('metricsBox').textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function submitTTS() {
+      const text = document.getElementById('ttsText').value;
+      const voice = document.getElementById('ttsVoice').value;
+      const speed = parseFloat(document.getElementById('ttsSpeed').value);
+      const format = document.getElementById('ttsFormat').value;
+      showLoader();
+      try {
+        const res = await fetch(`${API}/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, voice, speed, use_gpu: false, format })
+        });
+        const blob = await res.blob();
+        document.getElementById('ttsAudio').src = URL.createObjectURL(blob);
+      } finally {
+        hideLoader();
+      }
+    }
+
+    checkHealth();
+  </script>
+</body>
+</html>
+

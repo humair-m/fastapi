@@ -1,0 +1,11 @@
+curl -X POST "http://localhost:8000/tts/stream" \
+  -H "Content-Type: application/json" \
+  -o output.wav \
+  -d "{
+    \"text\": \"During the Elizabethan period, notable anthems were composed by Thomas Tallis, William Byrd, Tye, and Farrant but they were not mentioned in the Book of Common Prayer until 1662 when the famous rubric 'In quires and places where they sing here followeth the Anthem' first appears. Early anthems tended to be simple and homophonic in texture, so that the words could be clearly heard. During the 17th century, notable anthems were composed by Orlando Gibbons, Henry Purcell, and John Blow, with the verse anthem becoming the dominant musical form of the Restoration. In the 18th century, famed anthems were composed by Croft, Boyce, James Kent, James Nares, Benjamin Cooke, and Samuel Arnold. In the 19th century, Samuel Sebastian Wesley wrote anthems influenced by contemporary oratorio which stretch to several movements and last twenty minutes or longer. Later in the century, Charles Villiers Stanford used symphonic techniques to produce a more concise and unified structure. Many anthems have been written since then, generally by specialists in organ music rather than composers, and often in a conservative style. Major composers have usually written anthems in response to commissions and for special occasions: for instance Edward Elgar's 1912 'Great is the Lord' and 1914 'Give unto the Lord' (both with orchestral accompaniment); Benjamin Britten's 1943 'Rejoice in the Lamb' (a modern example of a multi-movement anthem, today heard mainly as a concert piece); and, on a much smaller scale, Ralph Vaughan Williams's 1952 'O Taste and See' written for the coronation of Queen Elizabeth II.\",
+    \"voice\": \"am_michael\",
+    \"speed\": 1.0,
+    \"use_gpu\": true,
+    \"format\": \"wav\"
+  }"
+

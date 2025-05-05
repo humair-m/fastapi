@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Enhanced TTS Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Fade-in animation */
+        .animate-fadeIn {
+            animation: fadeIn 1s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        /* Glow animation for buttons */
+        .animate-glow {
+            animation: glowPulse 2s ease-in-out infinite;
+        }
+        @keyframes glowPulse {
+            0%   { box-shadow: 0 0 5px rgba(99, 102, 241, 0.3); }
+            50%  { box-shadow: 0 0 20px rgba(99, 102, 241, 0.7); }
+            100% { box-shadow: 0 0 5px rgba(99, 102, 241, 0.3); }
+        }
+        /* Loading spinner animation */
+        .animate-spin {
+          animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        .error-message {
+            color: #dc2626;
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 min-h-screen">
+    <header class="bg-gradient-to-r from-indigo-600 to-blue-500 text-white p-6 text-center shadow-lg">
+        <h1 class="text-4xl font-bold animate-fadeIn">🗣️ Enhanced Text-to-Speech Dashboard</h1>
+        <div id="serverStatus" class="mt-2 text-sm">Checking server status...</div>
+        <div id="errorMessage" class="mt-2 text-sm text-red-200"></div>
+    </header>
+
+    <main class="p-6 space-y-10 max-w-6xl mx-auto animate-fadeIn">
+        <div id="loadingIndicator" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50 hidden">
+            <div class="animate-spin w-10 h-10 text-indigo-600 mr-4">
+                <svg class="animate-spin h-5 w-5 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+            </div>
+            <p class="text-lg text-gray-700">Processing...</p>
+        </div>
+
+        <section class="bg-white rounded-2xl shadow-xl p-6">
+            <h2 class="text-2xl font-semibold mb-4 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-mic w-6 h-6 text-indigo-500"><path d="M12 17c-1.333 0-4-2.667-4-8v-3c0-3.333 2.667-6 6-6s6 2.667 6 6v3c0 5.333-2.667 8-4 8z"></path><path d="M2 10c0 2.485.8 4.735 2.164 6.322a8 8 0 1 0 15.672 0C21.2 14.735 22 12.485 22 10V6c0-1.657-1.343-3-3-3H5c-1.657 0-3 1.343-3 3v4z"></path><path d="M12 19v4"></path></svg>
+                Text to Speech
+            </h2>
+
+            <div class="relative">
+                <textarea
+                    id="ttsText"
+                    rows="4"
+                    placeholder="Enter your text here..."
+                    class="w-full p-3 border rounded-md shadow-sm focus:ring-2 focus:ring-blue-400 pr-16"
+                    disabled
+                ></textarea>
+                <button
+                    id="clearTextBtn"
+                    class="absolute top-2 right-2 bg-gray-200 text-gray-600 hover:bg-gray-300 rounded p-1.5 text-xs transition duration-200"
+                    title="Clear Text"
+                    disabled
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x-circle w-4 h-4"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"></path><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg>
+                </button>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-4 mt-4">
+                <select
+                    id="ttsVoice"
+                    class="p-3 border rounded-md flex-1 shadow-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    disabled
+                    aria-label="Select Voice"
+                >
+                    <option value="">Loading voices...</option>
+                </select>
+                <input
+                    type="number"
+                    id="ttsSpeed"
+                    aria-label="Speech Speed"
+                    value="1.0"
+                    min="0.5"
+                    max="2.0"
+                    step="0.1"
+                    class="p-3 border rounded-md w-full sm:w-28 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    disabled
+                />
+                <select
+                    id="ttsFormat"
+                    class="p-3 border rounded-md w-full sm:w-28 shadow-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    disabled
+                    aria-label="Audio Format"
+                >
+                    <option value="wav">WAV</option>
+                    <option value="mp3">MP3</option>
+                </select>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-4 mt-5">
+                <button
+                    id="submitBtn"
+                    class="bg-indigo-600 text-white px-6 py-3 rounded-md shadow hover:bg-indigo-700 transition duration-300 animate-glow"
+                    disabled
+                >
+                    🔊 Convert to Speech
+                </button>
+                <button
+                    id="streamBtn"
+                    class="bg-green-600 text-white px-6 py-3 rounded-md shadow hover:bg-green-700 transition duration-300 animate-glow"
+                    disabled
+                >
+                    🎧 Stream Preview
+                </button>
+                <button
+                    id="downloadBtn"
+                    class="bg-blue-600 text-white px-6 py-3 rounded-md shadow hover:bg-blue-700 transition duration-300 hidden"
+                    disabled
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-download-cloud w-5 h-5 mr-2"><path d="M8 3h8a2 2 0 0 1 2 2v5m-1-5v5m-1-5l3 3-3 3"></path><path d="M8 17.9a4.5 4.5 0 0 1 8 0M12 12v6"></path></svg>
+                    Download Audio
+                </button>
+            </div>
+
+            <audio
+                id="ttsAudio"
+                controls
+                class="mt-6 w-full rounded-lg"
+                aria-label="Audio Player for TTS Output"
+            ></audio>
+        </section>
+
+        <section class="bg-white rounded-2xl shadow-xl p-6">
+            <h2 class="text-2xl font-semibold mb-4">📊 Service Metrics</h2>
+            <pre
+                id="metricsBox"
+                class="bg-gray-100 p-4 rounded-md text-sm overflow-auto h-60 border border-gray-200"
+            >Loading metrics...</pre>
+        </section>
+    </main>
+
+    <footer class="text-center py-4 text-gray-500">
+        &copy; 2025 Enhanced TTS Dashboard. Built with ❤️ using TailwindCSS.
+    </footer>
+
+    <script>
+        // --- Configuration ---
+        const API_BASE_URL = "http://localhost:8000"; // Backend API endpoint
+        const LOCAL_STORAGE_KEYS = {
+            VOICE: 'ttsDashboardVoice',
+            SPEED: 'ttsDashboardSpeed',
+            FORMAT: 'ttsDashboardFormat'
+        };
+
+        // --- DOM Element References ---
+        const serverStatusDiv = document.getElementById('serverStatus');
+        const errorMessageDiv = document.getElementById('errorMessage');
+        const ttsTextarea = document.getElementById('ttsText');
+        const ttsVoiceSelect = document.getElementById('ttsVoice');
+        const ttsSpeedInput = document.getElementById('ttsSpeed');
+        const ttsFormatSelect = document.getElementById('ttsFormat');
+        const ttsAudioPlayer = document.getElementById('ttsAudio');
+        const metricsBox = document.getElementById('metricsBox');
+        const submitBtn = document.getElementById('submitBtn');
+        const streamBtn = document.getElementById('streamBtn');
+        const clearTextBtn = document.getElementById('clearTextBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+
+        // --- Helper Functions ---
+        function showLoading() {
+            loadingIndicator.classList.remove('hidden');
+        }
+
+        function hideLoading() {
+            loadingIndicator.classList.add('hidden');
+        }
+
+        /**
+         * Performs a fetch request with basic error handling.
+         * @param {string} url - The URL to fetch.
+         * @param {object} options - Fetch options (method, headers, body, etc.).
+         * @returns {Promise<Response>} - The fetch Response object.
+         * @throws {Error} - If the network request fails or the server returns an error status.
+         */
+        async function fetchData(url, options = {}) {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                let errorText = `Server returned status ${response.status}`;
+                try {
+                    // Try to get more specific error from response body
+                    const errorData = await response.json();
+                    errorText = errorData.detail || errorData.message || errorText;
+                } catch (e) {
+                    // If response is not JSON or empty, use the status text
+                    errorText = response.statusText || errorText;
+                }
+                throw new Error(`HTTP error! Status: ${response.status}, Message: ${errorText}`);
+            }
+            return response;
+        }
+
+        /**
+         * Displays an error message to the user.
+         * @param {string} message - The error message to display.
+         */
+        function displayErrorMessage(message) {
+            errorMessageDiv.textContent = message;
+        }
+
+        /**
+         * Saves a setting to localStorage.
+         * @param {string} key - The key to use for localStorage.
+         * @param {string} value - The value to store.
+         */
+        function saveSetting(key, value) {
+            try {
+                localStorage.setItem(key, value);
+            } catch (error) {
+                console.warn(`Error saving to localStorage: ${error}`);
+            }
+        }
+
+        /**
+         * Loads a setting from localStorage.
+         * @param {string} key - The key to retrieve from localStorage.
+         * @param {string} defaultValue - The default value to use if the key is not found.
+         * @returns {string} The stored value or the default value.
+         */
+        function loadSetting(key, defaultValue = '') {
+            try {
+                const item = localStorage.getItem(key);
+                return item || defaultValue;
+            } catch (error) {
+                console.warn(`Error reading from localStorage: ${error}`);
+                return defaultValue;
+            }
+        }
+
+        // --- Event Listeners ---
+
+        clearTextBtn.addEventListener('click', () => {
+            ttsTextarea.value = '';
+            ttsAudioPlayer.src = '';
+            downloadBtn.classList.add('hidden');
+            errorMessageDiv.textContent = '';
+            ttsTextarea.disabled = false;
+        });
+
+        ttsVoiceSelect.addEventListener('change', (event) => {
+            saveSetting(LOCAL_STORAGE_KEYS.VOICE, event.target.value);
+        });
+
+        ttsSpeedInput.addEventListener('change', (event) => {
+            saveSetting(LOCAL_STORAGE_KEYS.SPEED, event.target.value);
+        });
+
+        ttsFormatSelect.addEventListener('change', (event) => {
+            saveSetting(LOCAL_STORAGE_KEYS.FORMAT, event.target.value);
+        });
+
+        /**
+         * Gathers TTS parameters from the form inputs.
+         * @returns {object|null} - Object with text, voice, speed, format, use_gpu or null if validation fails.
+         */
+        function getTTSParameters() {
+            const text = ttsTextarea.value.trim();
+            const voice = ttsVoiceSelect.value;
+            const speed = parseFloat(ttsSpeedInput.value);
+            const format = ttsFormatSelect.value;
+
+            if (!text) {
+                displayErrorMessage('Please enter some text to convert.');
+                return null;
+            }
+            if (!voice) {
+                displayErrorMessage('No voice selected or available.');
+                return null;
+            }
+
+            saveSetting(LOCAL_STORAGE_KEYS.VOICE, voice);
+            saveSetting(LOCAL_STORAGE_KEYS.SPEED, speed.toString());
+            saveSetting(LOCAL_STORAGE_KEYS.FORMAT, format);
+
+            return { text, voice, speed, format, use_gpu: false };
+        }
+
+        /**
+        * Updates the audio player with the new audio data and shows the download button.
+        * @param {Blob} audioBlob - The audio data as a Blob.
+        * @param {string} format - The audio format (e.g., 'wav', 'mp3').
+        */
+        function updateAudioPlayer(audioBlob, format) {
+            const audioURL = URL.createObjectURL(audioBlob);
+            ttsAudioPlayer.src = audioURL;
+            ttsAudioPlayer.load();
+
+            // Setup and show download button
+            downloadBtn.onclick = () => downloadAudio(audioURL, `tts_output.${format}`);
+            downloadBtn.classList.remove('hidden');
+        }
+
+        /**
+         * Triggers the download of the generated audio.
+         * @param {string} objectURL - The object URL of the audio data.
+         * @param {string} filename - The filename for the downloaded audio file.
+         */
+        function downloadAudio(objectURL, filename) {
+            const link = document.createElement('a');
+            link.href = objectURL;
+            link.download = filename;
+            document.body.appendChild(link); // Required for Firefox
+            link.click();
+            document.body.removeChild(link); // Clean up
+        }
+
+        /** Handles the standard TTS request (downloadable audio file). */
+        async function submitTTSRequest() {
+            const params = getTTSParameters();
+            if (!params) return;
+
+            showLoading();
+            setFormDisabled(true);
+            downloadBtn.classList.add('hidden');
+
+            try {
+                const response = await fetchData(`${API_BASE_URL}/tts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+
+                const audioBlob = await response.blob();
+                updateAudioPlayer(audioBlob, params.format);
+
+            } catch (error) {
+                if (error instanceof Error) {
+                    displayErrorMessage(`Failed to generate speech: ${error.message}`);
+                }
+                ttsAudioPlayer.src = '';
+            } finally {
+                hideLoading();
+                setFormDisabled(false);
+            }
+        }
+
+        /** Handles the streaming TTS request. */
+        async function streamTTSRequest() {
+            const params = getTTSParameters();
+            if (!params) return;
+
+            showLoading();
+            setFormDisabled(true);
+            downloadBtn.classList.add('hidden');
+
+            try {
+                const response = await fetchData(`${API_BASE_URL}/tts/stream`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+
+                if (!response.body || !response.body.getReader) {
+                    throw new Error('Streaming is not supported by this browser or the response format is incorrect.');
+                }
+
+                const reader = response.body.getReader();
+                const stream = new ReadableStream({
+                    async start(controller) {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            controller.enqueue(value);
+                        }
+                        controller.close();
+                    },
+                    cancel() { reader.cancel(); }
+                });
+
+                const contentType = response.headers.get('Content-Type') || `audio/${params.format}`;
+                const streamingResponse = new Response(stream, { headers: { 'Content-Type': contentType } });
+                const audioBlob = await streamingResponse.blob();
+                updateAudioPlayer(audioBlob, params.format);
+
+            } catch (error) {
+                 if (error instanceof Error) {
+                    displayErrorMessage(`Failed to stream speech: ${error.message}`);
+                }
+                ttsAudioPlayer.src = '';
+            } finally {
+                hideLoading();
+                setFormDisabled(false);
+            }
+        }
+
+        /**
+         * Fetches and populates the voice selection dropdown.
+         */
+        async function loadAvailableVoices() {
+            try {
+                const response = await fetchData(`${API_BASE_URL}/voices`);
+                const voiceData = await response.json();
+
+                ttsVoiceSelect.innerHTML = ''; // Clear placeholder
+                if (Object.keys(voiceData).length === 0) {
+                    ttsVoiceSelect.innerHTML = '<option value="">No voices available</option>';
+                    return;server depency
+                    
+                }
+
+                const savedVoice = loadSetting(LOCAL_STORAGE_KEYS.VOICE);
+                let foundSaved = false;
+
+                for (const category in voiceData) {
+                    const group = document.createElement('optgroup');
+                    group.label = category;
+                    voiceData[category].forEach(voice => {
+                        const option = document.createElement('option');
+                        option.value = voice.id;
+                        option.text = `${voice.name} (${category})`;
+                        if (voice.id === savedVoice) {
+                            option.selected = true;
+                            foundSaved = true;
+                        }
+                        group.appendChild(option);
+                    });
+                    ttsVoiceSelect.appendChild(group);
+                }
+                 // If saved voice wasn't found (e.g., removed from server), select the first available
+                if (!foundSaved && ttsVoiceSelect.options.length > 0) {
+                    ttsVoiceSelect.selectedIndex = 0;
+                    saveSetting(LOCAL_STORAGE_KEYS.VOICE, ttsVoiceSelect.value); // Save the new default
+                }
+
+            } catch (error) {
+                if (error instanceof Error) {
+                    displayErrorMessage(`Failed to load voices: ${error.message}`);
+                }
+                ttsVoiceSelect.innerHTML = '<option value="">Error loading voices</option>';
+            }
+        }
+
+        /**
+         * Fetches and displays service metrics.
+         */
+        async function loadServiceMetrics() {
+            try {
+                const response = await fetchData(`${API_BASE_URL}/metrics`);
+                const metricsText = await response.text(); // Get the metrics data as plain text.
+                metricsBox.textContent = metricsText;
+            } catch (error) {
+                if (error instanceof Error) {
+                    displayErrorMessage(`Failed to load metrics: ${error.message}`);
+                }
+                metricsBox.textContent = 'Error loading metrics. See console for details.';
+            }
+        }
+
+        function setFormDisabled(disabled) {
+            ttsTextarea.disabled = disabled;
+            ttsVoiceSelect.disabled = disabled;
+            ttsSpeedInput.disabled = disabled;
+            ttsFormatSelect.disabled = disabled;
+            submitBtn.disabled = disabled;
+            streamBtn.disabled = disabled;
+            clearTextBtn.disabled = disabled;
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', async () => {
+            ttsSpeedInput.value = loadSetting(LOCAL_STORAGE_KEYS.SPEED, '1.0');
+            ttsFormatSelect.value = loadSetting(LOCAL_STORAGE_KEYS.FORMAT, 'wav');
+
+            try {
+                const response = await fetchData(`${API_BASE_URL}/health`);
+                const data = await response.json();
+                serverStatusDiv.textContent = `✅ Server status: ${data.status}`;
+
+                await loadAvailableVoices();
+                await loadServiceMetrics();
+                setFormDisabled(false);
+            } catch (error) {
+                let message = 'Server offline or unreachable.';
+                 if (error instanceof Error) {
+                    message = `Server offline or unreachable. ${error.message}`;
+                }
+                serverStatusDiv.textContent = `❌ ${message}`;
+                setFormDisabled(true);
+            } finally {
+                hideLoading();
+            }
+        });
+
+        submitBtn.addEventListener('click', submitTTSRequest);
+        streamBtn.addEventListener('click', streamTTSRequest);
+    </script>
+</body>
+</html>
+

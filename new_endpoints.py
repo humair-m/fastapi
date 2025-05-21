@@ -881,28 +881,39 @@ async def preprocess_text(request: PreprocessRequest):
     processed_text = TextPreprocessor.preprocess_text(request.text)
     return PreprocessResponse(original_text=request.text, processed_text=processed_text)
 
+
+
 @app.get("/statistics")
 async def get_statistics():
     STATS_REQUESTS.labels(endpoint="/statistics").inc()
-    total_requests = sum(
-        metric.samples[0].value
-        for metric in REGISTRY._metrics.values()
-        if isinstance(metric, Counter)
-    )
-    avg_latency = (
-        REQUEST_LATENCY._metrics["tts_request_latency_seconds"]._sum
-        / max(1, REQUEST_LATENCY._metrics["tts_request_latency_seconds"]._count)
-        if "tts_request_latency_seconds" in REQUEST_LATENCY._metrics
-        else 0
-    )
+    # Calculate total requests by summing REQUEST_COUNT values
+    total_requests = 0
+    for metric_name, metric in REQUEST_COUNT._metrics.items():
+        for sample in metric._samples():
+            if sample.name.endswith("_total"):
+                total_requests += sample.value
+
+    # Calculate average latency from REQUEST_LATENCY
+    latency_sum = 0
+    latency_count = 0
+    for metric_name, metric in REQUEST_LATENCY._metrics.items():
+        for sample in metric._samples():
+            if sample.name.endswith("_sum"):
+                latency_sum += sample.value
+            elif sample.name.endswith("_count"):
+                latency_count += sample.value
+    avg_latency = latency_sum / max(1, latency_count) if latency_count > 0 else 0
+
     return {
-        "total_requests": total_requests,
+        "total_requests": int(total_requests),
         "average_latency_seconds": round(avg_latency, 3),
         "active_jobs": len(resource_manager.active_jobs),
         "cached_files": len(audio_cache),
         "disk_space_free_gb": round(shutil.disk_usage(Config.AUDIO_OUTPUT_DIR).free / (1024 ** 3), 2),
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
 
 @app.post("/tts/validate", response_model=ValidateTTSResponse)
 async def validate_tts_request(request: ValidateTTSRequest):

@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request, Depends
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -399,4 +400,569 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 @app.exception_handler(TTSException)
 async def tts_exception_handler(request: Request, exc: TTSException):
-    return JSONResponse(status_code='And you want to see the entire response?
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message}
+    )
+
+async def generate_audio(request_id: str, request: TTSRequest, stream: bool = False):
+    REQUEST_COUNT.labels(endpoint="/tts" if not stream else "/tts/stream").inc()
+    start_time = time.time()
+    try:
+        ACTIVE_JOBS.inc()
+        resource_manager.active_jobs[request_id] = {"status": "processing", "progress": 0}
+        lang_code = request.voice.value[0]
+        if lang_code not in ['a', 'b']:
+            raise TTSException(f"Invalid voice prefix: {lang_code}", 400)
+
+        pipeline = await resource_manager.get_pipeline(lang_code)
+        if request.pronunciations:
+            for word, pron in request.pronunciations.items():
+                pipeline.g2p.lexicon.golds[word.lower()] = pron
+
+        try:
+            pack = pipeline.load_voice(request.voice)
+        except Exception as e:
+            raise TTSException(f"Failed to load voice '{request.voice}': {str(e)}", 400)
+
+        model = await resource_manager.get_model(request.use_gpu and resource_manager.cuda_available)
+        audio_tensors = []
+        tokens = None
+
+        pipeline_results = list(pipeline(request.text, request.voice, request.speed))
+        if not pipeline_results:
+            raise TTSException("Pipeline processing failed", 500)
+
+        for i, (_, ps, _) in enumerate(pipeline_results):
+            resource_manager.active_jobs[request_id]["progress"] = min(95, int((i / len(pipeline_results)) * 100))
+            if i == 0 and request.return_tokens:
+                tokens = ps
+            if not ps:
+                continue
+            ps = ps[:len(pack)] if len(ps) - 1 >= len(pack) else ps
+            try:
+                audio = model(ps, pack[len(ps)-1], request.speed)
+                audio_tensors.append(audio)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e) and request.use_gpu:
+                    model = await resource_manager.get_model(False)
+                    audio = model(ps, pack[len(ps)-1], request.speed)
+                    audio_tensors.append(audio)
+                else:
+                    raise
+            await asyncio.sleep(0)
+
+        if not audio_tensors:
+            raise TTSException("No audio generated", 500)
+        combined_audio = torch.cat(audio_tensors, dim=0) if len(audio_tensors) > 1 else audio_tensors[0]
+
+        if stream:
+            media_type = {
+                AudioFormat.WAV: "audio/wav",
+                AudioFormat.MP3: "audio/mpeg",
+                AudioFormat.OGG: "audio/ogg"
+            }[request.format]
+            return StreamingResponse(
+                AudioProcessor.stream_audio(combined_audio, request.format),
+                media_type=media_type
+            )
+
+        output_path = Config.AUDIO_OUTPUT_DIR / f"{request_id}.wav"
+        duration = AudioProcessor.save_audio(combined_audio, output_path)
+        if request.format != AudioFormat.WAV:
+            output_path = AudioProcessor.convert_audio_format(output_path, request.format)
+
+        response = {
+            "audio_url": f"/audio/{output_path.name}",
+            "duration": duration,
+            "request_id": request_id,
+            "status": "complete",
+            "tokens": tokens if request.return_tokens else None
+        }
+        resource_manager.active_jobs[request_id] = {"status": "complete", "progress": 100}
+        resource_manager.job_results[request_id] = response
+        audio_cache[request_id] = output_path
+        REQUEST_LATENCY.labels(endpoint="/tts").observe(time.time() - start_time)
+        return response
+    except Exception as e:
+        logger.error(f"Error in generate_audio: {str(e)}")
+        resource_manager.active_jobs[request_id] = {"status": "failed", "progress": 0, "error": str(e)}
+        resource_manager.job_results[request_id] = {"error": str(e), "request_id": request_id, "status": "failed"}
+        raise TTSException(str(e), 500)
+    finally:
+        ACTIVE_JOBS.dec()
+
+async def process_batch(batch_id: str, items: List[TTSRequest]):
+    REQUEST_COUNT.labels(endpoint="/tts/batch").inc()
+    start_time = time.time()
+    total_items = len(items)
+    resource_manager.active_jobs[batch_id] = {
+        "status": "processing", "progress": 0, "total_items": total_items, "processed_items": 0
+    }
+    results = []
+    errors = []
+    processed = 0
+
+    for i, item in enumerate(items):
+        try:
+            request_id = f"{batch_id}_{i}"
+            result = await generate_audio(request_id, item)
+            results.append(result)
+        except TTSException as e:
+            errors.append({"index": i, "text": item.text[:50], "error": e.message})
+        finally:
+            processed += 1
+            resource_manager.active_jobs[batch_id]["progress"] = int((processed / total_items) * 100)
+            resource_manager.active_jobs[batch_id]["processed_items"] = processed
+
+    resource_manager.job_results[batch_id] = {
+        "results": results, "errors": errors, "total_items": total_items, "processed_items": processed
+    }
+    resource_manager.active_jobs[batch_id]["status"] = "complete"
+    resource_manager.active_jobs[batch_id]["progress"] = 100
+    REQUEST_LATENCY.labels(endpoint="/tts/batch").observe(time.time() - start_time)
+
+# Endpoints
+@app.post("/tts", response_model=TTSResponse)
+async def synthesize_speech(
+    request: TTSRequest,
+    background_tasks: BackgroundTasks,
+    limiter: RateLimiter = Depends(RateLimiter(times=10, seconds=60)) if Config.ENABLE_RATE_LIMITING else None
+):
+    request_id = str(uuid.uuid4())
+    resource_manager.active_jobs[request_id] = {"status": "queued", "progress": 0}
+    task = asyncio.create_task(generate_audio(request_id, request))
+    resource_manager.job_tasks[request_id] = task
+    background_tasks.add_task(lambda: None)
+    return TTSResponse(
+        request_id=request_id,
+        status="queued",
+        audio_url=None,
+        duration=None,
+        tokens=None
+    )
+
+@app.post("/tts/stream")
+async def stream_speech(
+    request: TTSRequest,
+    limiter: RateLimiter = Depends(RateLimiter(times=5, seconds=60)) if Config.ENABLE_RATE_LIMITING else None
+):
+    request_id = str(uuid.uuid4())
+    resource_manager.active_jobs[request_id] = {"status": "queued", "progress": 0}
+    return await generate_audio(request_id, request, stream=True)
+
+@app.post("/tts/batch", response_model=TTSBatchResponse)
+async def batch_synthesize_speech(
+    request: TTSBatchRequest,
+    background_tasks: BackgroundTasks,
+    limiter: RateLimiter = Depends(RateLimiter(times=5, seconds=60)) if Config.ENABLE_RATE_LIMITING else None
+):
+    batch_id = str(uuid.uuid4())
+    total_items = len(request.items)
+    resource_manager.active_jobs[batch_id] = {
+        "status": "queued", "progress": 0, "total_items": total_items, "processed_items": 0
+    }
+    task = asyncio.create_task(process_batch(batch_id, request.items))
+    resource_manager.job_tasks[batch_id] = task
+    background_tasks.add_task(lambda: None)
+    return TTSBatchResponse(batch_id=batch_id, status="queued", total_items=total_items)
+
+@app.post("/tts/multiple-voices", response_model=TTSBatchResponse)
+async def synthesize_multiple_voices(
+    request: MultiVoiceTTSRequest,
+    background_tasks: BackgroundTasks,
+    limiter: RateLimiter = Depends(RateLimiter(times=5, seconds=60)) if Config.ENABLE_RATE_LIMITING else None
+):
+    MULTI_VOICE_REQUESTS.labels(endpoint="/tts/multiple-voices").inc()
+    batch_id = str(uuid.uuid4())
+    tts_requests = [
+        TTSRequest(
+            text=request.text,
+            voice=voice,
+            speed=request.speed,
+            use_gpu=request.use_gpu,
+            format=request.format,
+            pronunciations=request.pronunciations
+        )
+        for voice in request.voices
+    ]
+    total_items = len(tts_requests)
+    resource_manager.active_jobs[batch_id] = {
+        "status": "queued", "progress": 0, "total_items": total_items, "processed_items": 0
+    }
+    task = asyncio.create_task(process_batch(batch_id, tts_requests))
+    resource_manager.job_tasks[batch_id] = task
+    background_tasks.add_task(lambda: None)
+    return TTSBatchResponse(batch_id=batch_id, status="queued", total_items=total_items)
+
+@app.get("/audio/batch/{batch_id}")
+async def get_batch_audio_files(batch_id: str):
+    REQUEST_COUNT.labels(endpoint="/audio/batch").inc()
+    if batch_id not in resource_manager.job_results:
+        raise TTSException("Batch not found", 404)
+    
+    batch_result = resource_manager.job_results[batch_id]
+    if batch_result["status"] != "complete":
+        raise TTSException("Batch processing not complete", 400)
+    
+    file_paths = []
+    for result in batch_result.get("results", []):
+        filename = result["audio_url"].split("/")[-1]
+        file_path = Config.AUDIO_OUTPUT_DIR / filename
+        if file_path.exists():
+            file_paths.append(file_path)
+    
+    if not file_paths:
+        raise TTSException("No audio files found for batch", 404)
+    
+    zip_path = AudioProcessor.create_zip_from_batch(batch_id, file_paths)
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=f"{batch_id}.zip"
+    )
+
+@app.post("/tts/emotion", response_model=TTSResponse)
+async def synthesize_emotional_speech(
+    request: EmotionalTTSRequest,
+    background_tasks: BackgroundTasks,
+    limiter: RateLimiter = Depends(RateLimiter(times=5, seconds=60)) if Config.ENABLE_RATE_LIMITING else None
+):
+    EMOTION_REQUESTS.labels(endpoint="/tts/emotion").inc()
+    request_id = str(uuid.uuid4())
+    resource_manager.active_jobs[request_id] = {"status": "queued", "progress": 0}
+    
+    speed_adjustments = {
+        EmotionOption.HAPPY: 1.2,
+        EmotionOption.SAD: 0.8,
+        EmotionOption.ANGRY: 1.1,
+        EmotionOption.NEUTRAL: 1.0
+    }
+    adjusted_speed = request.speed * speed_adjustments[request.emotion]
+    
+    tts_request = TTSRequest(
+        text=request.text,
+        voice=request.voice,
+        speed=adjusted_speed,
+        use_gpu=request.use_gpu,
+        format=request.format,
+        pronunciations=request.pronunciations
+    )
+    
+    task = asyncio.create_task(generate_audio(request_id, tts_request))
+    resource_manager.job_tasks[request_id] = task
+    background_tasks.add_task(lambda: None)
+    return TTSResponse(
+        request_id=request_id,
+        status="queued",
+        audio_url=None,
+        duration=None,
+        tokens=None
+    )
+
+@app.get("/status/{job_id}", response_model=JobStatus)
+async def check_job_status(job_id: str):
+    REQUEST_COUNT.labels(endpoint="/status").inc()
+    if job_id not in resource_manager.active_jobs:
+        raise TTSException("Job not found", 404)
+    status_data = resource_manager.active_jobs[job_id].copy()
+    if status_data["status"] == "complete" and job_id in resource_manager.job_results:
+        status_data["result"] = resource_manager.job_results[job_id]
+    return JobStatus(**status_data)
+
+@app.get("/status/batch/{batch_id}")
+async def check_batch_status(batch_id: str):
+    REQUEST_COUNT.labels(endpoint="/status/batch").inc()
+    if batch_id not in resource_manager.active_jobs:
+        raise TTSException("Batch not found", 404)
+    batch_status = resource_manager.active_jobs[batch_id].copy()
+    item_statuses = []
+    for i in range(batch_status.get("total_items", 0)):
+        item_id = f"{batch_id}_{i}"
+        if item_id in resource_manager.active_jobs:
+            item_status = resource_manager.active_jobs[item_id].copy()
+            if item_status["status"] == "complete" and item_id in resource_manager.job_results:
+                item_status["result"] = resource_manager.job_results[item_id]
+            item_statuses.append({"item_id": item_id, **item_status})
+    return {"batch_id": batch_id, "batch_status": batch_status, "items": item_statuses}
+
+@app.get("/audio/{filename}")
+async def get_audio_file(filename: str):
+    REQUEST_COUNT.labels(endpoint="/audio").inc()
+    if filename in audio_cache:
+        file_path = audio_cache[filename]
+    else:
+        file_path = Config.AUDIO_OUTPUT_DIR / filename
+        if not file_path.exists():
+            raise TTSException("Audio file not found", 404)
+        audio_cache[filename] = file_path
+    media_type = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg"
+    }.get(file_path.suffix, "application/octet-stream")
+    return FileResponse(path=file_path, media_type=media_type, filename=filename)
+
+@app.delete("/audio/{filename}")
+async def delete_audio_file(filename: str):
+    REQUEST_COUNT.labels(endpoint="/audio/delete").inc()
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise TTSException("Invalid filename", 400)
+    file_path = Config.AUDIO_OUTPUT_DIR / filename
+    if not file_path.exists():
+        raise TTSException("Audio file not found", 404)
+    try:
+        os.remove(file_path)
+        audio_cache.pop(filename, None)
+        return {"status": "deleted", "filename": filename}
+    except Exception as e:
+        logger.error(f"Failed to delete file {filename}: {e}")
+        raise TTSException(f"Failed to delete file: {str(e)}", 500)
+
+@app.get("/voices")
+async def list_available_voices():
+    REQUEST_COUNT.labels(endpoint="/voices").inc()
+    return {
+        "american_female": [
+            {"id": VoiceOption.HEART, "name": "Heart", "emoji": "❤️"},
+            {"id": VoiceOption.BELLA, "name": "Bella", "emoji": "🔥"},
+            {"id": VoiceOption.NICOLE, "name": "Nicole", "emoji": "🎧"},
+            {"id": VoiceOption.AOEDE, "name": "Aoede"},
+            {"id": VoiceOption.KORE, "name": "Kore"},
+            {"id": VoiceOption.SARAH, "name": "Sarah"},
+            {"id": VoiceOption.NOVA, "name": "Nova"},
+            {"id": VoiceOption.SKY, "name": "Sky"},
+            {"id": VoiceOption.ALLOY, "name": "Alloy"},
+            {"id": VoiceOption.JESSICA, "name": "Jessica"},
+            {"id": VoiceOption.RIVER, "name": "River"}
+        ],
+        "american_male": [
+            {"id": VoiceOption.MICHAEL, "name": "Michael"},
+            {"id": VoiceOption.FENRIR, "name": "Fenrir"},
+            {"id": VoiceOption.PUCK, "name": "Puck"},
+            {"id": VoiceOption.ECHO, "name": "Echo"},
+            {"id": VoiceOption.ERIC, "name": "Eric"},
+            {"id": VoiceOption.LIAM, "name": "Liam"},
+            {"id": VoiceOption.ONYX, "name": "Onyx"},
+            {"id": VoiceOption.SANTA, "name": "Santa"},
+            {"id": VoiceOption.ADAM, "name": "Adam"}
+        ],
+        "british_female": [
+            {"id": VoiceOption.EMMA, "name": "Emma"},
+            {"id": VoiceOption.ISABELLA, "name": "Isabella"},
+            {"id": VoiceOption.ALICE, "name": "Alice"},
+            {"id": VoiceOption.LILY, "name": "Lily"}
+        ],
+        "british_male": [
+            {"id": VoiceOption.GEORGE, "name": "George"},
+            {"id": VoiceOption.FABLE, "name": "Fable"},
+            {"id": VoiceOption.LEWIS, "name": "Lewis"},
+            {"id": VoiceOption.DANIEL, "name": "Daniel"}
+        ]
+    }
+
+@app.get("/voices/preview")
+async def preview_voices(background_tasks: BackgroundTasks):
+    REQUEST_COUNT.labels(endpoint="/voices/preview").inc()
+    preview_text = "Hello, this is a sample of my voice."
+    preview_requests = [
+        TTSRequest(text=preview_text, voice=voice, format=AudioFormat.WAV)
+        for voice in VoiceOption
+    ]
+    batch_id = str(uuid.uuid4())
+    resource_manager.active_jobs[batch_id] = {
+        "status": "queued",
+        "progress": 0,
+        "total_items": len(preview_requests),
+        "processed_items": 0
+    }
+    task = asyncio.create_task(process_batch(batch_id, preview_requests))
+    resource_manager.job_tasks[batch_id] = task
+    background_tasks.add_task(lambda: None)
+    return TTSBatchResponse(batch_id=batch_id, status="queued", total_items=len(preview_requests))
+
+@app.get("/health")
+async def health_check():
+    REQUEST_COUNT.labels(endpoint="/health").inc()
+    model_status = {"cpu": "available"}
+    if resource_manager.cuda_available:
+        model_status["gpu"] = "available" if "cuda" in resource_manager.models else "not initialized"
+    disk_usage = shutil.disk_usage(Config.AUDIO_OUTPUT_DIR)
+    ffmpeg_available = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True).returncode == 0
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "timestamp": time.time(),
+        "models": model_status,
+        "model_files": {
+            "model_exists": Config.MODEL_PATH.exists(),
+            "config_exists": Config.CONFIG_PATH.exists()
+        },
+        "disk_space": {
+            "total_gb": round(disk_usage.total / (1024 ** 3), 2),
+            "free_gb": round(disk_usage.free / (1024 ** 3), 2)
+        },
+        "memory": {
+            "cuda": torch.cuda.memory_summary(abbreviated=True) if resource_manager.cuda_available else "not available"
+        },
+        "cuda_available": resource_manager.cuda_available,
+        "ffmpeg_available": ffmpeg_available,
+        "active_jobs": len(resource_manager.active_jobs),
+        "cached_files": len(audio_cache),
+        "rate_limiting_enabled": Config.ENABLE_RATE_LIMITING
+    }
+
+@app.delete("/cleanup")
+async def cleanup_old_files(hours: int = Query(Config.CLEANUP_HOURS, ge=1)):
+    REQUEST_COUNT.labels(endpoint="/cleanup").inc()
+    cutoff_time = time.time() - (hours * 3600)
+    deleted_count = 0
+    error_count = 0
+    for file_path in Config.AUDIO_OUTPUT_DIR.glob("*.*"):
+        if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
+            try:
+                os.remove(file_path)
+                audio_cache.pop(file_path.name, None)
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"Failed to delete {file_path}: {e}")
+                error_count += 1
+    return {"status": "completed", "deleted_files": deleted_count, "errors": error_count}
+
+@app.post("/pronunciation")
+async def add_custom_pronunciation(
+    word: str = Query(..., min_length=1),
+    pronunciation: str = Query(..., min_length=1),
+    language_code: str = Query("a", enum=["a", "b"])
+):
+    REQUEST_COUNT.labels(endpoint="/pronunciation").inc()
+    try:
+        pipeline = await resource_manager.get_pipeline(language_code)
+        pipeline.g2p.lexicon.golds[word.lower()] = pronunciation
+        return {
+            "status": "success",
+            "word": word,
+            "pronunciation": pronunciation,
+            "language": "American English" if language_code == "a" else "British English"
+        }
+    except Exception as e:
+        logger.error(f"Failed to add pronunciation: {e}")
+        raise TTSException(f"Failed to add pronunciation: {str(e)}", 500)
+
+@app.get("/pronunciations")
+async def list_pronunciations(language_code: str = Query("a", enum=["a", "b"])):
+    REQUEST_COUNT.labels(endpoint="/pronunciations").inc()
+    try:
+        pipeline = await resource_manager.get_pipeline(language_code)
+        return {
+            "language": "American English" if language_code == "a" else "British English",
+            "pronunciations": pipeline.g2p.lexicon.golds
+        }
+    except Exception as e:
+        logger.error(f"Failed to list pronunciations: {e}")
+        raise TTSException(f"Failed to list pronunciations: {str(e)}", 500)
+
+@app.delete("/pronunciations/{word}")
+async def delete_pronunciation(word: str, language_code: str = Query("a", enum=["a", "b"])):
+    REQUEST_COUNT.labels(endpoint="/pronunciations/delete").inc()
+    try:
+        pipeline = await resource_manager.get_pipeline(language_code)
+        if word.lower() in pipeline.g2p.lexicon.golds:
+            del pipeline.g2p.lexicon.golds[word.lower()]
+            return {"status": "deleted", "word": word, "language": "American English" if language_code == "a" else "British English"}
+        raise TTSException(f"Pronunciation for '{word}' not found", 404)
+    except Exception as e:
+        logger.error(f"Failed to delete pronunciation: {e}")
+        raise TTSException(f"Failed to delete pronunciation: {str(e)}", 500)
+
+@app.post("/preprocess", response_model=PreprocessResponse)
+async def preprocess_text(request: PreprocessRequest):
+    REQUEST_COUNT.labels(endpoint="/preprocess").inc()
+    processed_text = TextPreprocessor.preprocess_text(request.text)
+    return PreprocessResponse(original_text=request.text, processed_text=processed_text)
+
+@app.get("/statistics")
+async def get_statistics():
+    STATS_REQUESTS.labels(endpoint="/statistics").inc()
+    total_requests = sum(
+        metric.samples[0].value
+        for metric in REGISTRY._metrics.values()
+        if isinstance(metric, Counter)
+    )
+    avg_latency = (
+        REQUEST_LATENCY._metrics["tts_request_latency_seconds"]._sum
+        / max(1, REQUEST_LATENCY._metrics["tts_request_latency_seconds"]._count)
+        if "tts_request_latency_seconds" in REQUEST_LATENCY._metrics
+        else 0
+    )
+    return {
+        "total_requests": total_requests,
+        "average_latency_seconds": round(avg_latency, 3),
+        "active_jobs": len(resource_manager.active_jobs),
+        "cached_files": len(audio_cache),
+        "disk_space_free_gb": round(shutil.disk_usage(Config.AUDIO_OUTPUT_DIR).free / (1024 ** 3), 2),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.post("/tts/validate", response_model=ValidateTTSResponse)
+async def validate_tts_request(request: ValidateTTSRequest):
+    VALIDATE_REQUESTS.labels(endpoint="/tts/validate").inc()
+    try:
+        if not request.text.strip():
+            return ValidateTTSResponse(is_valid=False, message="Text cannot be empty")
+        if request.voice not in VoiceOption:
+            return ValidateTTSResponse(is_valid=False, message=f"Invalid voice: {request.voice}")
+        if not (0.5 <= request.speed <= 2.0):
+            return ValidateTTSResponse(is_valid=False, message="Speed must be between 0.5 and 2.0")
+        if request.format not in AudioFormat:
+            return ValidateTTSResponse(is_valid=False, message=f"Invalid format: {request.format}")
+        if request.pronunciations:
+            for word, pron in request.pronunciations.items():
+                if not word.strip() or not pron.strip():
+                    return ValidateTTSResponse(is_valid=False, message="Pronunciation keys and values cannot be empty")
+        if len(request.text) > Config.MAX_CHAR_LIMIT:
+            return ValidateTTSResponse(is_valid=False, message=f"Text exceeds maximum length of {Config.MAX_CHAR_LIMIT} characters")
+        return ValidateTTSResponse(is_valid=True, message="Request is valid")
+    except Exception as e:
+        logger.error(f"Validation error: {e}")
+        return ValidateTTSResponse(is_valid=False, message=f"Validation failed: {str(e)}")
+
+@app.get("/metrics")
+async def metrics():
+    REQUEST_COUNT.labels(endpoint="/metrics").inc()
+    return Response(content=prometheus_client.generate_latest(REGISTRY), media_type="text/plain")
+
+@app.get("/config")
+async def get_config():
+    REQUEST_COUNT.labels(endpoint="/config").inc()
+    return {
+        "sample_rate": Config.SAMPLE_RATE,
+        "max_char_limit": Config.MAX_CHAR_LIMIT,
+        "supported_formats": [f.value for f in AudioFormat],
+        "cuda_available": resource_manager.cuda_available,
+        "rate_limiting_enabled": Config.ENABLE_RATE_LIMITING
+    }
+
+@app.post("/jobs/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    REQUEST_COUNT.labels(endpoint="/jobs/cancel").inc()
+    if job_id not in resource_manager.active_jobs:
+        raise TTSException("Job not found", 404)
+    resource_manager.cancel_job(job_id)
+    return {"status": "cancelled", "job_id": job_id}
+
+# Server
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", Config.DEFAULT_PORT))
+    logger.info(f"Starting Kokoro TTS API on {Config.DEFAULT_HOST}:{port}")
+    try:
+        loop = asyncio.get_running_loop()
+        nest_asyncio.apply()
+        logger.info("Running in notebook environment with nest_asyncio")
+        async def run_server():
+            config = uvicorn.Config(app, host=Config.DEFAULT_HOST, port=port, log_level="info")
+            server = uvicorn.Server(config)
+            await server.serve()
+        asyncio.run(run_server())
+    except RuntimeError:
+        uvicorn.run(app, host=Config.DEFAULT_HOST, port=port, log_level="info")
